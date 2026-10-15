@@ -1,63 +1,72 @@
---[[
-  Sniper Arena Pro
-  Features:
-    - Hitbox Expander      (ขยาย hitbox ศัตรู)
-    - No Recoil            (ล็อค camera recoil)
-    - Fast Reload          (ลด reload time)
-    - Auto Heal            (heal อัตโนมัติ)
-    - Player ESP           (box + name + dist + health)
-    - Loot ESP             (แสดง item/loot บนแผนที่)
-    - Tactical Teleport    (คลิกจุด teleport ทันที)
-    - Anti-Kick            (ป้องกัน kick/ban จาก server)
-  Keys: INSERT = show/hide | tab ด้านบน = เลือกหมวด
-]]
+-- รอเกม load ก่อนแล้วค่อยรันโปร
+-- วาง loadstring นี้ใน executor แทน
+
+task.wait(3) -- รอ 3 วิให้เกม init ก่อน
 
 ---------------------------------------------------------------------------
 -- SERVICES
 ---------------------------------------------------------------------------
-local Players          = game:GetService("Players")
-local RunService       = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
-local TweenService     = game:GetService("TweenService")
+local Players           = game:GetService("Players")
+local RunService        = game:GetService("RunService")
+local UserInputService  = game:GetService("UserInputService")
+local TweenService      = game:GetService("TweenService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Camera           = workspace.CurrentCamera
-local LocalPlayer      = Players.LocalPlayer
+local Camera            = workspace.CurrentCamera
+local LocalPlayer       = Players.LocalPlayer
+
+-- รอ character load
+if not LocalPlayer.Character then
+    LocalPlayer.CharacterAdded:Wait()
+end
+task.wait(1)
 
 ---------------------------------------------------------------------------
 -- CONFIG
 ---------------------------------------------------------------------------
 local CFG = {
+    -- Aimbot
+    Aimbot         = false,
+    AimbotHoldMode = true,    -- true = hold RMB | false = always on
+    AimbotBone     = "Head",  -- "Head" | "UpperTorso" | "HumanoidRootPart"
+    AimbotFOV      = 150,
+    AimbotSmooth   = 0.12,
+    AimbotMaxDist  = 2000,
+    HeadOffset     = Vector3.new(0, 0.3, 0),
+
     -- Hitbox
     HitboxEnabled  = false,
-    HitboxSize     = 8,      -- studs, default char = ~3
+    HitboxSize     = 8,
 
     -- No Recoil
     NoRecoil       = false,
 
     -- Fast Reload
     FastReload     = false,
-    ReloadMult     = 0.1,    -- 0.1 = 10x ไว กว่าปกติ
+    ReloadMult     = 0.1,
 
     -- Auto Heal
     AutoHeal       = false,
-    HealThreshold  = 60,     -- heal เมื่อ HP ต่ำกว่านี้
-    HealAmount     = 100,    -- heal เป็น HP นี้
+    HealThreshold  = 60,
+    HealAmount     = 100,
 
     -- ESP
     PlayerESP      = false,
+    EnemyOnly      = true,    -- true = เห็นแค่ศัตรู
     LootESP        = false,
     ESPMaxDist     = 2000,
 
     -- Teleport
-    TeleportMode   = false,  -- click on screen → teleport
+    TeleportMode   = false,
 
     -- Anti-Kick
     AntiKick       = false,
 
+    -- Colors
     Accent  = Color3.fromHex("8B5CF6"),
     BG      = Color3.fromHex("09090D"),
     BtnBG   = Color3.fromHex("1C1C26"),
     EnemyC  = Color3.fromRGB(255, 75, 75),
+    TeamC   = Color3.fromRGB(75, 200, 75),
     LootC   = Color3.fromRGB(255, 210, 50),
 }
 
@@ -80,13 +89,44 @@ local function isAlive(c)
     return h and h.Health > 0
 end
 
+local function isEnemy(player)
+    if player == LocalPlayer then return false end
+    if not LocalPlayer.Team then return true end
+    return player.TeamColor ~= LocalPlayer.TeamColor
+end
+
+local HEAD_PRIORITY = {"Head", "HumanoidRootPart"}
+local function getBone(char, boneName)
+    if boneName == "Head" then
+        for _, name in ipairs(HEAD_PRIORITY) do
+            local p = char:FindFirstChild(name)
+            if p and p:IsA("BasePart") then return p end
+            for _, desc in ipairs(char:GetDescendants()) do
+                if desc.Name == name and desc:IsA("BasePart") then return desc end
+            end
+        end
+    end
+    local direct = char:FindFirstChild(boneName)
+    if direct and direct:IsA("BasePart") then return direct end
+    for _, desc in ipairs(char:GetDescendants()) do
+        if desc.Name == boneName and desc:IsA("BasePart") then return desc end
+    end
+    return char:FindFirstChild("HumanoidRootPart")
+end
+
+local function predPos(bone)
+    local base = bone.Position
+    if bone.Name == "Head" then base = base + CFG.HeadOffset end
+    local char = bone.Parent
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local vel  = root and root.AssemblyLinearVelocity or Vector3.zero
+    return base + vel * 0.1
+end
+
 ---------------------------------------------------------------------------
--- 1. HITBOX EXPANDER
--- ขยาย HumanoidRootPart ของทุก player ใน client side
--- ทำให้ยิงโดน target ง่ายขึ้น แม้ aim ไม่ตรงหัวพอดี
+-- HITBOX EXPANDER
 ---------------------------------------------------------------------------
 local hitboxConns = {}
-
 local function applyHitbox(player)
     if player == LocalPlayer then return end
     local function onChar(char)
@@ -95,13 +135,10 @@ local function applyHitbox(player)
         if not root then return end
         if CFG.HitboxEnabled then
             root.Size = Vector3.new(CFG.HitboxSize, CFG.HitboxSize, CFG.HitboxSize)
-            root.Transparency = 0.8
-            root.CanCollide = false
+            root.Transparency = 0.8; root.CanCollide = false
         end
     end
-    if hitboxConns[player.UserId] then
-        hitboxConns[player.UserId]:Disconnect()
-    end
+    if hitboxConns[player.UserId] then hitboxConns[player.UserId]:Disconnect() end
     hitboxConns[player.UserId] = player.CharacterAdded:Connect(onChar)
     if player.Character then onChar(player.Character) end
 end
@@ -114,12 +151,10 @@ local function refreshHitboxes()
                 local root = c:FindFirstChild("HumanoidRootPart")
                 if root then
                     if CFG.HitboxEnabled then
-                        root.Size = Vector3.new(CFG.HitboxSize, CFG.HitboxSize, CFG.HitboxSize)
-                        root.Transparency = 0.8
-                        root.CanCollide = false
+                        root.Size = Vector3.new(CFG.HitboxSize,CFG.HitboxSize,CFG.HitboxSize)
+                        root.Transparency = 0.8; root.CanCollide = false
                     else
-                        root.Size = Vector3.new(2, 2, 1)
-                        root.Transparency = 1
+                        root.Size = Vector3.new(2,2,1); root.Transparency = 1
                     end
                 end
             end
@@ -129,109 +164,75 @@ end
 
 Players.PlayerAdded:Connect(applyHitbox)
 Players.PlayerRemoving:Connect(function(p)
-    if hitboxConns[p.UserId] then
-        hitboxConns[p.UserId]:Disconnect()
-        hitboxConns[p.UserId] = nil
-    end
+    if hitboxConns[p.UserId] then hitboxConns[p.UserId]:Disconnect(); hitboxConns[p.UserId]=nil end
 end)
 for _, p in ipairs(Players:GetPlayers()) do applyHitbox(p) end
 
 ---------------------------------------------------------------------------
--- 2. NO RECOIL
--- lock Camera CFrame Y-axis ไม่ให้กระเด้งขึ้น
+-- NO RECOIL & FAST RELOAD & AUTO HEAL
 ---------------------------------------------------------------------------
-local lastCamCF = nil
-local noRecoilConn = nil
-
+local lastCamCF, noRecoilConn = nil, nil
 local function startNoRecoil()
     if noRecoilConn then noRecoilConn:Disconnect() end
     lastCamCF = Camera.CFrame
     noRecoilConn = RunService.RenderStepped:Connect(function()
-        if not CFG.NoRecoil then
-            noRecoilConn:Disconnect(); noRecoilConn = nil; return
-        end
-        -- ล็อค pitch (X rotation) ไม่ให้กระเด้งขึ้น
+        if not CFG.NoRecoil then noRecoilConn:Disconnect(); noRecoilConn=nil; return end
         local cur = Camera.CFrame
-        local rx, ry, rz = cur:ToEulerAnglesYXZ()
+        local rx,ry,rz = cur:ToEulerAnglesYXZ()
         if lastCamCF then
-            local lx, ly, lz = lastCamCF:ToEulerAnglesYXZ()
-            -- ถ้า pitch กระเด้ง ให้ reset กลับ
-            if math.abs(rx - lx) > 0.01 and not UserInputService:IsMouseButtonPressed(
-                Enum.UserInputType.MouseButton2) then
-                Camera.CFrame = CFrame.new(cur.Position)
-                    * CFrame.fromEulerAnglesYXZ(lx, ry, rz)
+            local lx,ly,lz = lastCamCF:ToEulerAnglesYXZ()
+            if math.abs(rx-lx) > 0.01 and not UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) then
+                Camera.CFrame = CFrame.new(cur.Position)*CFrame.fromEulerAnglesYXZ(lx,ry,rz)
             end
         end
         lastCamCF = Camera.CFrame
     end)
 end
 
----------------------------------------------------------------------------
--- 3. FAST RELOAD
--- hook Tool.Activated → manipulate AnimationTrack speed
--- Sniper Arena reload อยู่ใน Tool script — เราเพิ่ม speed animation
----------------------------------------------------------------------------
-local reloadConns = {}
-
-local function hookReload(tool)
-    if not tool:IsA("Tool") then return end
-    -- หา AnimationController หรือ Humanoid animation
-    local char = getChar()
-    if not char then return end
-    local human = getHuman()
-    if not human then return end
-
-    local animator = human:FindFirstChildOfClass("Animator")
+local function hookAnimator(animator)
     if not animator then return end
-
-    local conn = animator.AnimationPlayed:Connect(function(track)
-        -- reload animation มักมีชื่อ reload หรือ speed < 1
+    animator.AnimationPlayed:Connect(function(track)
         local name = track.Name:lower()
-        if name:find("reload") or name:find("recharge") or name:find("chamber") then
-            if CFG.FastReload then
-                track:AdjustSpeed(1 / CFG.ReloadMult)
-            end
+        local isReload = name:find("reload") or name:find("recharge") or name:find("chamber") or name:find("cock") or name:find("pump")
+        if isReload and CFG.FastReload then
+            track:AdjustSpeed(1 / math.max(CFG.ReloadMult, 0.01))
+            track:GetPropertyChangedSignal("Speed"):Connect(function()
+                if CFG.FastReload and track.IsPlaying then
+                    track:AdjustSpeed(1 / math.max(CFG.ReloadMult, 0.01))
+                end
+            end)
         end
     end)
-    table.insert(reloadConns, conn)
 end
 
 local function watchTools()
     local char = getChar(); if not char then return end
-    for _, tool in ipairs(char:GetChildren()) do hookReload(tool) end
-    char.ChildAdded:Connect(function(child)
-        task.wait(0.1); hookReload(child)
+    local human = getHuman(); if not human then return end
+    local animator = human:FindFirstChildOfClass("Animator")
+    if animator then hookAnimator(animator) end
+    human.ChildAdded:Connect(function(child)
+        if child:IsA("Animator") then hookAnimator(child) end
     end)
 end
 
----------------------------------------------------------------------------
--- 4. AUTO HEAL
--- Sniper Arena มี heal item หรือ regen — เราจับ Humanoid.Health แล้ว
--- fire RemoteEvent heal ถ้าเจอ หรือ set health โดยตรง (depends on game)
----------------------------------------------------------------------------
 local autoHealConn = nil
-
 local function startAutoHeal()
     if autoHealConn then autoHealConn:Disconnect() end
     autoHealConn = RunService.Heartbeat:Connect(function()
         if not CFG.AutoHeal then return end
         local h = getHuman(); if not h then return end
         if h.Health < CFG.HealThreshold and h.Health > 0 then
-            -- method 1: set directly (works if server doesn't validate)
             h.Health = math.min(h.Health + 2, CFG.HealAmount)
-            -- method 2: try fire heal remote if exists
-            local remote = ReplicatedStorage:FindFirstChild("Heal")
-                or ReplicatedStorage:FindFirstChild("UseHeal")
-                or ReplicatedStorage:FindFirstChild("HealPlayer")
-            if remote and remote:IsA("RemoteEvent") then
-                remote:FireServer()
-            end
+            pcall(function()
+                local remote = ReplicatedStorage:FindFirstChild("Heal") or ReplicatedStorage:FindFirstChild("UseHeal")
+                if remote and remote:IsA("RemoteEvent") then remote:FireServer() end
+            end)
         end
     end)
 end
 
 ---------------------------------------------------------------------------
--- 5. DRAWING POOL
+-- DRAWING POOL & AIMBOT & ESP
 ---------------------------------------------------------------------------
 local pool = {}
 local function drw(pid, key, dtype)
@@ -249,20 +250,77 @@ local function clearPool(pid)
 end
 Players.PlayerRemoving:Connect(function(p) clearPool("p"..p.UserId) end)
 
----------------------------------------------------------------------------
--- 6. PLAYER ESP
----------------------------------------------------------------------------
+local curTarget, curPlayer = nil, nil
+local fovCircle = Drawing.new("Circle")
+fovCircle.Filled = false; fovCircle.Thickness = 1.2
+
+local function findTarget()
+    local center = Vector2.new(Camera.ViewportSize.X/2, Camera.ViewportSize.Y/2)
+    local best, bestP, bestD = nil, nil, CFG.AimbotFOV
+    local lc = LocalPlayer.Character
+    local lr = lc and getRoot()
+    for _, p in ipairs(Players:GetPlayers()) do
+        if not isEnemy(p) then continue end
+        local c = p.Character
+        if not c or not isAlive(c) then continue end
+        local root = c:FindFirstChild("HumanoidRootPart"); if not root then continue end
+        if lr and (lr.Position-root.Position).Magnitude > CFG.AimbotMaxDist then continue end
+        local bone = getBone(c, CFG.AimbotBone); if not bone then continue end
+        local aim  = predPos(bone)
+        local sp, onSc = w2s(aim); if not onSc then continue end
+        local sd = (sp-center).Magnitude
+        if sd < bestD then bestD=sd; best=bone; bestP=p end
+    end
+    curTarget=best; curPlayer=bestP
+end
+
+local hl = nil
+local function setHL(char)
+    if not char then if hl then hl:Destroy(); hl=nil end; return end
+    if not hl then
+        hl = Instance.new("Highlight")
+        hl.FillTransparency=0.65; hl.OutlineTransparency=0
+    end
+    hl.FillColor=CFG.Accent; hl.OutlineColor=CFG.Accent
+    hl.Adornee=char; hl.Parent=char
+end
+
+local Mouse = LocalPlayer:GetMouse()
+local function doAimbot()
+    fovCircle.Position = Vector2.new(Camera.ViewportSize.X/2, Camera.ViewportSize.Y/2)
+    fovCircle.Radius   = CFG.AimbotFOV
+    fovCircle.Color    = CFG.Aimbot and CFG.Accent or Color3.fromRGB(80,80,80)
+    fovCircle.Visible  = CFG.Aimbot
+
+    if not CFG.Aimbot then setHL(nil); return end
+    if CFG.AimbotHoldMode and not UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) then setHL(nil); return end
+
+    findTarget()
+    setHL(curPlayer and curPlayer.Character)
+    if not curTarget then return end
+
+    local aimPos  = predPos(curTarget)
+    local aim, ok = w2s(aimPos); if not ok then return end
+
+    if mousemoverel then
+        local d = aim - Vector2.new(Mouse.X, Mouse.Y)
+        mousemoverel(d.X * CFG.AimbotSmooth, d.Y * CFG.AimbotSmooth)
+    end
+end
+
 local function renderPlayerESP(player)
     if player == LocalPlayer then return end
     local char  = player.Character
     local pid   = "p"..player.UserId
-    local keys  = {"bT","bB","bL","bR","name","dist","hpBg","hp"}
+    local keys  = {"bT","bB","bL","bR","name","dist","hpBg","hp","teamTag"}
     local function hide()
         for _,k in ipairs(keys) do
             local d=pool[pid] and pool[pid][k]; if d then d.Visible=false end
         end
     end
     if not char or not CFG.PlayerESP then hide(); return end
+    if CFG.EnemyOnly and not isEnemy(player) then hide(); return end
+
     local root  = char:FindFirstChild("HumanoidRootPart")
     local human = char:FindFirstChildOfClass("Humanoid")
     if not root or not human or not isAlive(char) then hide(); return end
@@ -278,12 +336,12 @@ local function renderPlayerESP(player)
     if not topV then hide(); return end
 
     local boxH = math.max(math.abs(topS.Y-botS.Y),1)
-    local boxW = boxH * 0.44
+    local boxW = boxH*0.44
     local L,R  = topS.X-boxW/2, topS.X+boxW/2
     local T,B  = topS.Y, botS.Y
-    local col  = CFG.EnemyC
+    local col = isEnemy(player) and CFG.EnemyC or CFG.TeamC
 
-    local segs = {
+    local segs={
         {"bT",Vector2.new(L,T),Vector2.new(R,T)},
         {"bB",Vector2.new(L,B),Vector2.new(R,B)},
         {"bL",Vector2.new(L,T),Vector2.new(L,B)},
@@ -294,7 +352,6 @@ local function renderPlayerESP(player)
         d.From=s[2]; d.To=s[3]; d.Color=col; d.Thickness=1.2; d.Visible=true
     end
 
-    -- health bar
     local hp  = math.clamp(human.Health/math.max(human.MaxHealth,1),0,1)
     local bx  = L-6
     local hpC = Color3.fromRGB(math.floor(255*(1-hp)),math.floor(255*hp),0)
@@ -305,107 +362,68 @@ local function renderPlayerESP(player)
     hb.From=Vector2.new(bx,B); hb.To=Vector2.new(bx,B-boxH*hp)
     hb.Color=hpC; hb.Thickness=3; hb.Visible=true
 
-    -- name
     local nd=drw(pid,"name","Text")
     nd.Text=player.Name; nd.Position=Vector2.new(topS.X,T-14)
-    nd.Size=13; nd.Color=Color3.fromRGB(255,255,255)
-    nd.Outline=true; nd.Center=true; nd.Visible=true
+    nd.Size=13; nd.Color=col; nd.Outline=true; nd.Center=true; nd.Visible=true
 
-    -- dist
-    local dist = lr and (lr.Position-root.Position).Magnitude or 0
+    local dist=lr and (lr.Position-root.Position).Magnitude or 0
     local dd=drw(pid,"dist","Text")
     dd.Text=string.format("%.0fm",dist); dd.Position=Vector2.new(topS.X,B+3)
     dd.Size=11; dd.Color=Color3.fromRGB(190,190,190)
     dd.Outline=true; dd.Center=true; dd.Visible=true
+
+    local tt=drw(pid,"teamTag","Text")
+    tt.Text= isEnemy(player) and "[ ENEMY ]" or "[ TEAM ]"
+    tt.Position=Vector2.new(topS.X,B+14)
+    tt.Size=10; tt.Color=col
+    tt.Outline=true; tt.Center=true; tt.Visible=true
 end
 
----------------------------------------------------------------------------
--- 7. LOOT ESP
--- scan workspace ด้วย keyword ที่มักใช้ใน Sniper Arena
----------------------------------------------------------------------------
-local lootDrawings = {}
-local LOOT_KEYWORDS = {
-    "ammo","medkit","heal","health","crate","pickup","item",
-    "loot","supply","gun","rifle","sniper","pistol","grenade","coin","cash","gem"
-}
-
+local lootDrawings={}
+local LOOT_KW={"ammo","medkit","heal","health","crate","pickup","item","loot","supply","gun","rifle","sniper","pistol","grenade","coin","cash","gem"}
 local function isLoot(obj)
     if not obj:IsA("BasePart") and not obj:IsA("Model") then return false end
-    local name = obj.Name:lower()
-    for _, kw in ipairs(LOOT_KEYWORDS) do
-        if name:find(kw) then return true end
-    end
+    local name=obj.Name:lower()
+    for _,kw in ipairs(LOOT_KW) do if name:find(kw) then return true end end
     return false
 end
-
 local function clearLootESP()
-    for _, d in pairs(lootDrawings) do
+    for _,d in pairs(lootDrawings) do
         pcall(function() d.line:Remove(); d.label:Remove() end)
-    end
-    lootDrawings = {}
+    end; lootDrawings={}
 end
-
 local function renderLootESP()
-    -- clear old
-    for id, d in pairs(lootDrawings) do
-        local ok, _ = pcall(function() return d.line.Visible end)
-        if not ok then lootDrawings[id] = nil end
-    end
-
-    if not CFG.LootESP then
-        clearLootESP(); return
-    end
-
-    local lr = getRoot()
-    local scanned = {}
-
-    for _, obj in ipairs(workspace:GetDescendants()) do
+    if not CFG.LootESP then clearLootESP(); return end
+    local lr=getRoot(); local scanned={}
+    for _,obj in ipairs(workspace:GetDescendants()) do
         if isLoot(obj) then
             local pos
-            if obj:IsA("BasePart") then
-                pos = obj.Position
-            elseif obj:IsA("Model") and obj.PrimaryPart then
-                pos = obj.PrimaryPart.Position
-            end
+            if obj:IsA("BasePart") then pos=obj.Position
+            elseif obj:IsA("Model") and obj.PrimaryPart then pos=obj.PrimaryPart.Position end
             if pos then
-                local dist = lr and (lr.Position-pos).Magnitude or 0
-                if dist < CFG.ESPMaxDist then
-                    local sp, onSc = w2s(pos)
-                    local id = tostring(obj)
-                    scanned[id] = true
+                local dist=lr and (lr.Position-pos).Magnitude or 0
+                if dist<CFG.ESPMaxDist then
+                    local sp,onSc=w2s(pos)
+                    local id=tostring(obj); scanned[id]=true
                     if not lootDrawings[id] then
-                        local line  = Drawing.new("Line")
-                        local label = Drawing.new("Text")
-                        lootDrawings[id] = {line=line, label=label}
+                        lootDrawings[id]={line=Drawing.new("Line"),label=Drawing.new("Text")}
                     end
-                    local ld = lootDrawings[id]
+                    local ld=lootDrawings[id]
                     if onSc then
-                        local center = Vector2.new(Camera.ViewportSize.X/2, Camera.ViewportSize.Y/2)
-                        -- tracer line from bottom center → loot
-                        ld.line.From    = Vector2.new(center.X, Camera.ViewportSize.Y)
-                        ld.line.To      = sp
-                        ld.line.Color   = CFG.LootC
-                        ld.line.Thickness = 1
-                        ld.line.Transparency = 0.6
-                        ld.line.Visible = true
-                        ld.label.Text     = obj.Name.." ["..string.format("%.0f",dist).."m]"
-                        ld.label.Position = Vector2.new(sp.X, sp.Y-14)
-                        ld.label.Size     = 11
-                        ld.label.Color    = CFG.LootC
-                        ld.label.Outline  = true
-                        ld.label.Center   = true
-                        ld.label.Visible  = true
-                    else
-                        ld.line.Visible  = false
-                        ld.label.Visible = false
-                    end
+                        local cx=Camera.ViewportSize.X/2
+                        ld.line.From=Vector2.new(cx,Camera.ViewportSize.Y)
+                        ld.line.To=sp; ld.line.Color=CFG.LootC
+                        ld.line.Thickness=1; ld.line.Transparency=0.6; ld.line.Visible=true
+                        ld.label.Text=obj.Name.." ["..string.format("%.0f",dist).."m]"
+                        ld.label.Position=Vector2.new(sp.X,sp.Y-14)
+                        ld.label.Size=11; ld.label.Color=CFG.LootC
+                        ld.label.Outline=true; ld.label.Center=true; ld.label.Visible=true
+                    else ld.line.Visible=false; ld.label.Visible=false end
                 end
             end
         end
     end
-
-    -- hide loot ที่หายไปแล้ว
-    for id, ld in pairs(lootDrawings) do
+    for id,ld in pairs(lootDrawings) do
         if not scanned[id] then
             pcall(function() ld.line.Visible=false; ld.label.Visible=false end)
         end
@@ -413,125 +431,78 @@ local function renderLootESP()
 end
 
 ---------------------------------------------------------------------------
--- 8. TACTICAL TELEPORT
--- Mouse click บนพื้น → teleport ไปจุดนั้นทันที
+-- TACTICAL TELEPORT & ANTI-KICK
 ---------------------------------------------------------------------------
-local tpClick = nil
-
+local tpClick=nil
 local function startTeleport()
     if tpClick then tpClick:Disconnect() end
-    tpClick = UserInputService.InputBegan:Connect(function(input, gp)
-        if gp then return end
-        if not CFG.TeleportMode then return end
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then
-            local unitRay = Camera:ScreenPointToRay(input.Position.X, input.Position.Y)
-            local params  = RaycastParams.new()
-            params.FilterType = Enum.RaycastFilterType.Exclude
-            params.FilterDescendantsInstances = {getChar() or workspace}
-            local result = workspace:Raycast(unitRay.Origin, unitRay.Direction * 2000, params)
+    tpClick=UserInputService.InputBegan:Connect(function(input,gp)
+        if gp or not CFG.TeleportMode then return end
+        if input.UserInputType==Enum.UserInputType.MouseButton1 then
+            local ray=Camera:ScreenPointToRay(input.Position.X,input.Position.Y)
+            local params=RaycastParams.new()
+            params.FilterType=Enum.RaycastFilterType.Exclude
+            params.FilterDescendantsInstances={getChar() or workspace}
+            local result=workspace:Raycast(ray.Origin,ray.Direction*2000,params)
             if result then
-                local root = getRoot()
-                if root then
-                    root.CFrame = CFrame.new(result.Position + Vector3.new(0, 3, 0))
-                end
+                local root=getRoot()
+                if root then root.CFrame=CFrame.new(result.Position+Vector3.new(0,3,0)) end
             end
         end
     end)
 end
-
 local function stopTeleport()
-    CFG.TeleportMode = false
-    if tpClick then tpClick:Disconnect(); tpClick = nil end
+    CFG.TeleportMode=false
+    if tpClick then tpClick:Disconnect(); tpClick=nil end
 end
 
----------------------------------------------------------------------------
--- 9. ANTI-KICK
--- ป้องกัน server kick ด้วยการ hook RemoteEvent / BindableEvent ที่ชื่อ kick
--- และ block Player:Kick() call จาก LocalScript
----------------------------------------------------------------------------
-local antiKickConn = {}
-
+local antiKickConn={}
 local function setupAntiKick()
-    -- hook ทุก RemoteEvent ที่ชื่อคล้าย kick/ban/remove
-    local KICK_KEYWORDS = {"kick","ban","remove","disconnect","anticheat","ac"}
-    local function blockRemote(obj)
-        if not obj:IsA("RemoteEvent") and not obj:IsA("RemoteFunction") then return end
-        local name = obj.Name:lower()
-        for _, kw in ipairs(KICK_KEYWORDS) do
+    local KW={"kick","ban","remove","disconnect","anticheat","ac"}
+    local function block(obj)
+        if not obj:IsA("RemoteEvent") then return end
+        local name=obj.Name:lower()
+        for _,kw in ipairs(KW) do
             if name:find(kw) then
-                -- hook OnClientEvent แล้ว ignore
-                if obj:IsA("RemoteEvent") then
-                    local conn = obj.OnClientEvent:Connect(function()
-                        -- ไม่ทำอะไร — block kick event
-                    end)
-                    table.insert(antiKickConn, conn)
-                end
+                table.insert(antiKickConn, obj.OnClientEvent:Connect(function() end))
             end
         end
     end
-
-    -- scan existing
-    for _, obj in ipairs(game:GetDescendants()) do blockRemote(obj) end
-    -- watch new
-    local conn = game.DescendantAdded:Connect(function(obj)
-        task.wait(0.1); blockRemote(obj)
-    end)
-    table.insert(antiKickConn, conn)
-
-    -- hook LocalPlayer:Kick() — replace method
-    local mt = getmetatable(LocalPlayer)
-    if mt and mt.__index then
-        local oldKick = mt.__index.Kick
-        mt.__index.Kick = function(self, ...)
-            if self == LocalPlayer and CFG.AntiKick then
-                warn("[AntiKick] Kick blocked")
-                return
-            end
-            return oldKick(self, ...)
-        end
-    end
-
-    print("[AntiKick] active")
+    for _,obj in ipairs(game:GetDescendants()) do block(obj) end
+    table.insert(antiKickConn, game.DescendantAdded:Connect(function(obj)
+        task.wait(0.1); block(obj)
+    end))
 end
-
 local function stopAntiKick()
-    for _, c in ipairs(antiKickConn) do pcall(function() c:Disconnect() end) end
+    for _,c in ipairs(antiKickConn) do pcall(function() c:Disconnect() end) end
     table.clear(antiKickConn)
 end
 
 ---------------------------------------------------------------------------
--- MAIN LOOP
+-- MAIN LOOPS & RESPAWN
 ---------------------------------------------------------------------------
 RunService.RenderStepped:Connect(function()
-    -- player ESP
-    for _, p in ipairs(Players:GetPlayers()) do renderPlayerESP(p) end
-    -- loot ESP (ทุก 0.5s เพื่อ performance)
+    doAimbot()
+    for _,p in ipairs(Players:GetPlayers()) do renderPlayerESP(p) end
 end)
 
-local lootTimer = 0
+local lootTimer=0
 RunService.Heartbeat:Connect(function(dt)
-    lootTimer = lootTimer + dt
-    if lootTimer >= 0.5 then
-        lootTimer = 0
-        renderLootESP()
-    end
-    -- hitbox size sync (ถ้าปรับค่าใน slider)
+    lootTimer=lootTimer+dt
+    if lootTimer>=0.5 then lootTimer=0; renderLootESP() end
     if CFG.HitboxEnabled then refreshHitboxes() end
 end)
 
----------------------------------------------------------------------------
--- RESPAWN HANDLER
----------------------------------------------------------------------------
 LocalPlayer.CharacterAdded:Connect(function()
     task.wait(0.8)
     watchTools()
     if CFG.AutoHeal  then startAutoHeal()  end
     if CFG.NoRecoil  then startNoRecoil()  end
 end)
-task.wait(1); watchTools()
+task.wait(0.5); watchTools()
 
 ---------------------------------------------------------------------------
--- UI HELPERS
+-- UI BUILDER & SCREEN GUI
 ---------------------------------------------------------------------------
 local function mkCorner(p,r)
     Instance.new("UICorner",p).CornerRadius=UDim.new(0,r or 6)
@@ -549,29 +520,22 @@ local function mkLabel(parent,text,size,color,font,xa,pos,sz)
     l.Size=sz or UDim2.new(1,0,1,0); l.Parent=parent; return l
 end
 
----------------------------------------------------------------------------
--- SCREEN GUI
----------------------------------------------------------------------------
 local sg=Instance.new("ScreenGui")
-sg.Name="SniperArenaPro"; sg.ResetOnSpawn=false
+sg.Name="SniperArenaProV2"; sg.ResetOnSpawn=false
 sg.DisplayOrder=999; sg.ZIndexBehavior=Enum.ZIndexBehavior.Sibling
 sg.Parent=LocalPlayer:WaitForChild("PlayerGui")
 
-local WIN_W,WIN_H=300,530
+local WIN_W,WIN_H=300,580
 local win=Instance.new("Frame")
-win.Size=UDim2.new(0,WIN_W,0,WIN_H); win.Position=UDim2.fromScale(0.36,0.10)
+win.Size=UDim2.new(0,WIN_W,0,WIN_H); win.Position=UDim2.fromScale(0.36,0.08)
 win.BackgroundColor3=CFG.BG; win.BorderSizePixel=0
 win.ClipsDescendants=true; win.Parent=sg
 mkCorner(win,8); mkStroke(win,CFG.Accent,1)
 
--- HEADER
 local hdr=Instance.new("Frame")
 hdr.Size=UDim2.new(1,0,0,32); hdr.BackgroundColor3=CFG.BtnBG
 hdr.BorderSizePixel=0; hdr.Parent=win; mkCorner(hdr,8)
-local hf=Instance.new("Frame")
-hf.Size=UDim2.new(1,0,0,8); hf.Position=UDim2.new(0,0,1,-8)
-hf.BackgroundColor3=CFG.BtnBG; hf.BorderSizePixel=0; hf.Parent=hdr
-mkLabel(hdr,"  🎯 SNIPER ARENA PRO",12,CFG.Accent,Enum.Font.GothamBold,
+mkLabel(hdr,"  🎯 SNIPER ARENA PRO v2",12,CFG.Accent,Enum.Font.GothamBold,
     Enum.TextXAlignment.Left,UDim2.new(0,0,0,0),UDim2.new(1,-56,1,0))
 
 local minBtn=Instance.new("TextButton")
@@ -586,7 +550,6 @@ closeBtn.BackgroundColor3=CFG.BG; closeBtn.Text="✕"; closeBtn.TextColor3=Color
 closeBtn.Font=Enum.Font.GothamBold; closeBtn.TextSize=12; closeBtn.BorderSizePixel=0
 closeBtn.Parent=hdr; mkCorner(closeBtn,4)
 
--- TABS
 local tabBar=Instance.new("Frame")
 tabBar.Size=UDim2.new(1,0,0,28); tabBar.Position=UDim2.new(0,0,0,32)
 tabBar.BackgroundColor3=CFG.BG; tabBar.BorderSizePixel=0; tabBar.Parent=win
@@ -596,7 +559,6 @@ tabL.SortOrder=Enum.SortOrder.LayoutOrder; tabL.Padding=UDim.new(0,3)
 local tabP=Instance.new("UIPadding",tabBar)
 tabP.PaddingLeft=UDim.new(0,6); tabP.PaddingTop=UDim.new(0,4)
 
--- SCROLL
 local scroll=Instance.new("ScrollingFrame")
 scroll.Size=UDim2.new(1,0,1,-62); scroll.Position=UDim2.new(0,0,0,62)
 scroll.BackgroundTransparency=1; scroll.BorderSizePixel=0
@@ -608,12 +570,9 @@ scL.SortOrder=Enum.SortOrder.LayoutOrder; scL.Padding=UDim.new(0,4)
 local scP=Instance.new("UIPadding",scroll)
 scP.PaddingLeft=UDim.new(0,10); scP.PaddingRight=UDim.new(0,10); scP.PaddingTop=UDim.new(0,8)
 
----------------------------------------------------------------------------
--- COMPONENT FACTORIES
----------------------------------------------------------------------------
 local oN=0
 local function nO() oN=oN+1; return oN end
-local pages={Combat={},ESP={},Utility={}}
+local pages={Combat={},ESP={},Aimbot={},Utility={}}
 
 local function mkSection(text,page)
     local f=Instance.new("Frame")
@@ -707,159 +666,115 @@ local function mkSlider(label,minV,maxV,init,fmt,cb,page)
     if page then table.insert(pages[page],row) end
 end
 
----------------------------------------------------------------------------
--- POPULATE
----------------------------------------------------------------------------
--- COMBAT
-mkSection("HITBOX","Combat")
-mkToggle("Hitbox Expander",CFG.HitboxEnabled,function(v)
-    CFG.HitboxEnabled=v; refreshHitboxes()
-end,"Combat")
-mkSlider("Hitbox Size",3,30,CFG.HitboxSize,"%.1f st",function(v)
-    CFG.HitboxSize=v; if CFG.HitboxEnabled then refreshHitboxes() end
-end,"Combat")
-
-mkSection("WEAPON","Combat")
-mkToggle("No Recoil",CFG.NoRecoil,function(v)
-    CFG.NoRecoil=v; if v then startNoRecoil() end
-end,"Combat")
-mkToggle("Fast Reload",CFG.FastReload,function(v)
-    CFG.FastReload=v
-end,"Combat")
-mkSlider("Reload Speed",0.05,1,CFG.ReloadMult,"%.2fx",function(v)
-    CFG.ReloadMult=v
-end,"Combat")
-
-mkSection("HEAL","Combat")
-mkToggle("Auto Heal",CFG.AutoHeal,function(v)
-    CFG.AutoHeal=v; if v then startAutoHeal() end
-end,"Combat")
-mkSlider("Heal Threshold",10,99,CFG.HealThreshold,"%.0f HP",function(v)
-    CFG.HealThreshold=v
-end,"Combat")
-mkSlider("Heal To",50,100,CFG.HealAmount,"%.0f HP",function(v)
-    CFG.HealAmount=v
-end,"Combat")
-
--- ESP
-mkSection("PLAYER ESP","ESP")
-mkToggle("Player ESP",CFG.PlayerESP,function(v) CFG.PlayerESP=v end,"ESP")
-mkSection("LOOT ESP","ESP")
-mkToggle("Loot ESP + Tracers",CFG.LootESP,function(v)
-    CFG.LootESP=v; if not v then clearLootESP() end
-end,"ESP")
-mkSlider("ESP Max Dist",100,5000,CFG.ESPMaxDist,"%.0f st",function(v)
-    CFG.ESPMaxDist=v
-end,"ESP")
-
--- UTILITY
-mkSection("TELEPORT","Utility")
-mkToggle("Tactical Teleport (LMB)",CFG.TeleportMode,function(v)
-    CFG.TeleportMode=v
-    if v then startTeleport() else stopTeleport() end
-end,"Utility")
-
-mkSection("PROTECTION","Utility")
-mkToggle("Anti-Kick",CFG.AntiKick,function(v)
-    CFG.AntiKick=v
-    if v then setupAntiKick() else stopAntiKick() end
-end,"Utility")
-
----------------------------------------------------------------------------
--- TABS LOGIC
----------------------------------------------------------------------------
-local tabBtns={}
-local function switchTab(name)
-    for pg,items in pairs(pages) do
-        for _,item in ipairs(items) do item.Visible=(pg==name) end
+local function mkDropdown(label,opts,init,cb,page)
+    local row=Instance.new("Frame")
+    row.Size=UDim2.new(1,-10,0,34); row.BackgroundColor3=CFG.BtnBG
+    row.BorderSizePixel=0; row.LayoutOrder=nO(); row.Parent=scroll
+    mkCorner(row,6); row.ClipsDescendants=false
+    mkLabel(row,label,12,Color3.fromRGB(220,220,220),Enum.Font.Gotham,
+        Enum.TextXAlignment.Left,UDim2.new(0,10,0,0),UDim2.new(0.5,0,1,0))
+    local btn=Instance.new("TextButton")
+    btn.Size=UDim2.new(0.46,0,0,26); btn.Position=UDim2.new(0.52,0,0.5,-13)
+    btn.BackgroundColor3=Color3.fromHex("09090D"); btn.Text=init
+    btn.TextColor3=CFG.Accent; btn.Font=Enum.Font.Gotham; btn.TextSize=11
+    btn.BorderSizePixel=0; btn.Parent=row; mkCorner(btn,4); mkStroke(btn,CFG.Accent,1)
+    local df=Instance.new("Frame")
+    df.Size=UDim2.new(0.46,0,0,#opts*28+4); df.Position=UDim2.new(0.52,0,1,2)
+    df.BackgroundColor3=Color3.fromHex("1C1C26"); df.BorderSizePixel=0
+    df.Visible=false; df.ZIndex=20; df.Parent=row; mkCorner(df,4); mkStroke(df,CFG.Accent,1)
+    for i,opt in ipairs(opts) do
+        local item=Instance.new("TextButton")
+        item.Size=UDim2.new(1,0,0,26); item.Position=UDim2.new(0,0,0,(i-1)*28+2)
+        item.BackgroundTransparency=1; item.Text=opt
+        item.TextColor3=Color3.fromRGB(210,210,210)
+        item.Font=Enum.Font.Gotham; item.TextSize=11; item.ZIndex=21; item.Parent=df
+        item.MouseButton1Click:Connect(function()
+            btn.Text=opt; df.Visible=false; cb(opt)
+        end)
+        item.MouseEnter:Connect(function()
+            item.BackgroundTransparency=0.7; item.BackgroundColor3=CFG.Accent
+        end)
+        item.MouseLeave:Connect(function() item.BackgroundTransparency=1 end)
     end
-    for tname,tbtn in pairs(tabBtns) do
-        tbtn.BackgroundColor3=tname==name and CFG.Accent or CFG.BtnBG
-        tbtn.TextColor3=tname==name and Color3.fromRGB(255,255,255) or Color3.fromRGB(160,160,160)
-    end
+    btn.MouseButton1Click:Connect(function() df.Visible=not df.Visible end)
+    if page then table.insert(pages[page],row) end
 end
 
-for i,tname in ipairs({"Combat","ESP","Utility"}) do
-    local tb=Instance.new("TextButton")
-    tb.Size=UDim2.new(0,88,0,22); tb.BackgroundColor3=CFG.BtnBG
-    tb.Text=tname; tb.TextColor3=Color3.fromRGB(160,160,160)
-    tb.Font=Enum.Font.GothamBold; tb.TextSize=11
-    tb.BorderSizePixel=0; tb.LayoutOrder=i; tb.Parent=tabBar; mkCorner(tb,4)
-    tabBtns[tname]=tb
-    tb.MouseButton1Click:Connect(function() switchTab(tname) end)
-end
-switchTab("Combat")
+-- สร้าง Widgets ในแต่ละหมวดหมู่
+mkSection("COMBAT", "Combat")
+mkToggle("Hitbox Expander", CFG.HitboxEnabled, function(v) CFG.HitboxEnabled = v; refreshHitboxes() end, "Combat")
+mkSlider("Hitbox Size", 2, 20, CFG.HitboxSize, "%.1f", function(v) CFG.HitboxSize = v end, "Combat")
+mkToggle("No Recoil", CFG.NoRecoil, function(v) CFG.NoRecoil = v; if v then startNoRecoil() end end, "Combat")
+mkToggle("Fast Reload", CFG.FastReload, function(v) CFG.FastReload = v end, "Combat")
+mkSlider("Reload Multiplier", 0.05, 1, CFG.ReloadMult, "%.2fx", function(v) CFG.ReloadMult = v end, "Combat")
+mkToggle("Auto Heal", CFG.AutoHeal, function(v) CFG.AutoHeal = v; if v then startAutoHeal() end end, "Combat")
 
----------------------------------------------------------------------------
--- WINDOW DRAG
----------------------------------------------------------------------------
-local wDrag,wDS,wSP=false,nil,nil
-hdr.InputBegan:Connect(function(i)
-    if i.UserInputType==Enum.UserInputType.MouseButton1 then
-        wDrag=true; wDS=i.Position; wSP=win.Position end
-end)
-hdr.InputEnded:Connect(function(i)
-    if i.UserInputType==Enum.UserInputType.MouseButton1 then wDrag=false end
-end)
-UserInputService.InputChanged:Connect(function(i)
-    if wDrag and i.UserInputType==Enum.UserInputType.MouseMovement then
-        local d=i.Position-wDS
-        win.Position=UDim2.new(wSP.X.Scale,wSP.X.Offset+d.X,wSP.Y.Scale,wSP.Y.Offset+d.Y)
-    end
-end)
+mkSection("ESP", "ESP")
+mkToggle("Player ESP", CFG.PlayerESP, function(v) CFG.PlayerESP = v end, "ESP")
+mkToggle("Enemy Only (Team Check)", CFG.EnemyOnly, function(v) CFG.EnemyOnly = v end, "ESP")
+mkToggle("Loot ESP", CFG.LootESP, function(v) CFG.LootESP = v; if not v then clearLootESP() end end, "ESP")
+mkSlider("Max Distance", 200, 5000, CFG.ESPMaxDist, "%.0fm", function(v) CFG.ESPMaxDist = v end, "ESP")
 
----------------------------------------------------------------------------
--- MINIMIZE / CLOSE / REOPEN
----------------------------------------------------------------------------
-local minimized=false
-minBtn.MouseButton1Click:Connect(function()
-    minimized=not minimized
-    TweenService:Create(win,TweenInfo.new(0.18,Enum.EasingStyle.Quint),{
-        Size=UDim2.new(0,WIN_W,0,minimized and 32 or WIN_H)}):Play()
-    minBtn.Text=minimized and "□" or "—"
-end)
-closeBtn.MouseButton1Click:Connect(function() win.Visible=false end)
-UserInputService.InputBegan:Connect(function(input,gp)
-    if gp then return end
-    if input.KeyCode==Enum.KeyCode.Insert then
-        win.Visible=not win.Visible
-        if win.Visible then
-            minimized=false; win.Size=UDim2.new(0,WIN_W,0,WIN_H); minBtn.Text="—"
+mkSection("AIMBOT", "Aimbot")
+mkToggle("Enable Aimbot", CFG.Aimbot, function(v) CFG.Aimbot = v end, "Aimbot")
+mkToggle("Hold RMB Mode", CFG.AimbotHoldMode, function(v) CFG.AimbotHoldMode = v end, "Aimbot")
+mkDropdown("Target Bone", {"Head", "UpperTorso", "HumanoidRootPart"}, CFG.AimbotBone, function(v) CFG.AimbotBone = v end, "Aimbot")
+mkSlider("FOV Radius", 30, 400, CFG.AimbotFOV, "%.0fpx", function(v) CFG.AimbotFOV = v end, "Aimbot")
+mkSlider("Smoothness", 0.01, 0.5, CFG.AimbotSmooth, "%.2f", function(v) CFG.AimbotSmooth = v end, "Aimbot")
+
+mkSection("UTILITY", "Utility")
+mkToggle("Tactical Teleport (Click)", CFG.TeleportMode, function(v) CFG.TeleportMode = v; if v then startTeleport() else stopTeleport() end end, "Utility")
+mkToggle("Anti-Kick Protection", CFG.AntiKick, function(v) CFG.AntiKick = v; if v then setupAntiKick() else stopAntiKick() end end, "Utility")
+
+-- Tab Switching Logic
+local tabNames = {"Combat", "ESP", "Aimbot", "Utility"}
+local activeTab = "Combat"
+
+local function switchTab(tabName)
+    activeTab = tabName
+    for name, pageList in pairs(pages) do
+        local show = (name == tabName)
+        for _, obj in ipairs(pageList) do
+            obj.Visible = show
         end
     end
+end
+
+for _, tName in ipairs(tabNames) do
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(0, 64, 0, 20)
+    btn.BackgroundColor3 = (tName == activeTab) and CFG.Accent or CFG.BtnBG
+    btn.Text = tName
+    btn.TextColor3 = Color3.fromRGB(220,220,220)
+    btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 10
+    btn.BorderSizePixel = 0
+    btn.Parent = tabBar
+    mkCorner(btn, 4)
+
+    btn.MouseButton1Click:Connect(function()
+        for _, child in ipairs(tabBar:GetChildren()) do
+            if child:IsA("TextButton") then
+                child.BackgroundColor3 = CFG.BtnBG
+            end
+        end
+        btn.BackgroundColor3 = CFG.Accent
+        switchTab(tName)
+    end)
+end
+
+-- Window Controls
+local minimized = false
+minBtn.MouseButton1Click:Connect(function()
+    minimized = not minimized
+    scroll.Visible = not minimized
+    tabBar.Visible = not minimized
+    win.Size = minimized and UDim2.new(0, WIN_W, 0, 32) or UDim2.new(0, WIN_W, 0, WIN_H)
+    minBtn.Text = minimized and "+" or "—"
 end)
 
----------------------------------------------------------------------------
--- STATUS HUD
----------------------------------------------------------------------------
-local hudSG=Instance.new("ScreenGui")
-hudSG.Name="SniperHUD"; hudSG.ResetOnSpawn=false
-hudSG.DisplayOrder=998; hudSG.Parent=LocalPlayer:WaitForChild("PlayerGui")
-local hudF=Instance.new("Frame")
-hudF.Size=UDim2.new(0,300,0,38); hudF.Position=UDim2.fromScale(0.5,0.93)
-hudF.AnchorPoint=Vector2.new(0.5,0); hudF.BackgroundColor3=CFG.BG
-hudF.BackgroundTransparency=0.2; hudF.BorderSizePixel=0; hudF.Parent=hudSG
-mkCorner(hudF,6)
-local hudAcc=Instance.new("Frame")
-hudAcc.Size=UDim2.new(1,0,0,2); hudAcc.BackgroundColor3=CFG.Accent
-hudAcc.BorderSizePixel=0; hudAcc.Parent=hudF
-local hudLbl=Instance.new("TextLabel")
-hudLbl.BackgroundTransparency=1; hudLbl.Size=UDim2.new(1,0,1,0)
-hudLbl.Font=Enum.Font.Gotham; hudLbl.TextSize=10
-hudLbl.TextColor3=Color3.fromRGB(210,210,210)
-hudLbl.TextXAlignment=Enum.TextXAlignment.Center; hudLbl.Parent=hudF
-
-RunService.Heartbeat:Connect(function()
-    local h=getHuman()
-    hudLbl.Text=string.format(
-        "Hitbox:%s(%.0f)  NoRecoil:%s  Reload:%s  Heal:%s  ESP:%s  AK:%s",
-        CFG.HitboxEnabled and "ON" or "OFF", CFG.HitboxSize,
-        CFG.NoRecoil  and "ON" or "OFF",
-        CFG.FastReload and "ON" or "OFF",
-        CFG.AutoHeal  and "ON" or "OFF",
-        CFG.PlayerESP and "ON" or "OFF",
-        CFG.AntiKick  and "ON" or "OFF"
-    )
+closeBtn.MouseButton1Click:Connect(function()
+    sg:Destroy()
 end)
 
-print("[Sniper Arena Pro] loaded — INSERT show/hide UI")
+switchTab("Combat")
